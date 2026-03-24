@@ -4,7 +4,6 @@
 
 This is a small cross-platform tool where you can press-and-hold a hotkey, record audio, send to Groq's Whisper model, and paste the transcription.
 
-**Part of the BridgeMind Vibeathon**
 
 **Project files**: [app.py](app.py), [requirements.txt](requirements.txt), [.env.example](.env.example)
 
