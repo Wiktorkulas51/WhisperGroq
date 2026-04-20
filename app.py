@@ -12,6 +12,9 @@ import tkinter as tk
 from tkinter import ttk
 from tkinter import font as tkfont
 from dotenv import load_dotenv
+import pystray
+from pystray import MenuItem as item
+from PIL import Image, ImageDraw
 
 # load environment variables from .env (if present)
 load_dotenv()
@@ -79,18 +82,30 @@ class Recorder:
         return outpath
 
 
+# list of models to alternate between
+MODELS = ["whisper-large-v3", "whisper-large-v3-turbo"]
+_model_index = 0
+_model_lock = threading.Lock()
+
 def transcribe_with_groq(audio_path: str):
+    global _model_index
     if Groq is None:
         raise RuntimeError("Groq package not installed or failed to import")
     if not API_KEY:
         raise RuntimeError("Set GROQ_API_KEY environment variable first")
+
+    with _model_lock:
+        model_name = MODELS[_model_index]
+        _model_index = (_model_index + 1) % len(MODELS)
+
+    print(f"Transcribing using model: {model_name}")
 
     client = Groq(api_key=API_KEY)
     with open(audio_path, "rb") as f:
         audio_bytes = f.read()
     resp = client.audio.transcriptions.create(
         file=(os.path.basename(audio_path), audio_bytes),
-        model="whisper-large-v3-turbo",
+        model=model_name,
         temperature=0,
         response_format="verbose_json",
     )
@@ -281,119 +296,146 @@ def main():
         print("")
 
     print_banner(HOTKEY)
+    # Use ctrl+alt as default if not in .env
+    current_hotkey = os.getenv("HOTKEY", "ctrl+alt")
+    print_banner(current_hotkey)
     recorder = Recorder()
-
     gui = GUIManager()
 
-    def on_press(e):
-        # start only if not already recording
-        if recorder._running.is_set():
-            return
-        print("Start recording")
-        try:
-            gui.show(("record", "Recording..."))
-        except Exception:
-            pass
-        recorder.last_error = None
-        recorder.start()
-        # wait for the input stream to open or error
-        started = recorder._started_event.wait(timeout=1.0)
-        if not started:
-            # if there was an error, show it; otherwise show a timeout message
-            msg = recorder.last_error or "Timeout opening audio input device"
-            gui.update(f"Recording error: {msg}")
-            time.sleep(1.5)
-            gui.close()
-            return
+    recording_state = {"is_recording": False, "last_toggle_time": 0}
+    state_lock = threading.Lock()
 
-    def on_release(e):
-        # ignore if we never started recording
-        if not recorder._running.is_set():
-            return
-        print("Stop recording")
-        try:
-            # save to temp file
-            fd, path = tempfile.mkstemp(suffix=".wav")
-            os.close(fd)
-            gui.update("Stopping... saving audio")
-            audio_path = recorder.stop(path)
-        except Exception as ex:
-            print("Recording error:", ex, file=sys.stderr)
-            gui.update(f"Recording error: {ex}")
-            time.sleep(2)
-            gui.close()
-            return
+    def toggle_recording(e=None):
+        with state_lock:
+            now = time.time()
+            # Debounce: ignore presses within 500ms
+            if now - recording_state["last_toggle_time"] < 0.5:
+                return
+            recording_state["last_toggle_time"] = now
 
-        def _process():
-            try:
-                gui.update(("processing", "Processing audio..."))
-                text = transcribe_with_groq(audio_path)
-                if not text:
-                    text = "(no transcription returned)"
-                print("Transcription:\n", text)
-
-                # copy to clipboard (prefer pyperclip, fallback to tkinter clipboard)
+            if not recording_state["is_recording"]:
+                # START RECORDING
+                print("Start recording (toggle)")
                 try:
-                    import pyperclip
-                    pyperclip.copy(text)
+                    gui.show(("record", f"Recording... [Press {current_hotkey} to stop]"))
                 except Exception:
+                    pass
+                recorder.last_error = None
+                recorder.start()
+                started = recorder._started_event.wait(timeout=1.0)
+                if not started:
+                    msg = recorder.last_error or "Timeout opening audio input device"
+                    gui.update(f"Recording error: {msg}")
+                    time.sleep(1.5)
+                    gui.close()
+                    return
+                recording_state["is_recording"] = True
+            else:
+                # STOP RECORDING
+                print("Stop recording (toggle)")
+                recording_state["is_recording"] = False
+                try:
+                    fd, path = tempfile.mkstemp(suffix=".wav")
+                    os.close(fd)
+                    gui.update("Stopping... saving audio")
+                    audio_path = recorder.stop(path)
+                except Exception as ex:
+                    print("Recording error:", ex, file=sys.stderr)
+                    gui.update(f"Recording error: {ex}")
+                    time.sleep(2)
+                    gui.close()
+                    return
+
+                def _process():
                     try:
-                        # use the GUI root for clipboard operations (must be main thread)
-                        def _cb():
+                        gui.update(("processing", "Processing audio..."))
+                        text = transcribe_with_groq(audio_path)
+                        if not text:
+                            text = "(no transcription returned)"
+                        print("Transcription:\n", text)
+
+                        try:
+                            import pyperclip
+                            pyperclip.copy(text)
+                        except Exception:
                             try:
-                                gui.root.clipboard_clear()
-                                gui.root.clipboard_append(text)
-                                gui.root.update()
+                                def _cb():
+                                    try:
+                                        gui.root.clipboard_clear()
+                                        gui.root.clipboard_append(text)
+                                        gui.root.update()
+                                    except Exception:
+                                        pass
+                                gui.root.after(0, _cb)
                             except Exception:
                                 pass
-                        gui.root.after(0, _cb)
-                    except Exception:
-                        pass
 
-                # show done text briefly, then paste into focused app
-                try:
-                    snippet = text if len(text) <= 300 else text[:300] + "..."
-                    gui.show(("done", snippet))
-                except Exception:
-                    pass
+                        try:
+                            snippet = text if len(text) <= 300 else text[:300] + "..."
+                            gui.show(("done", snippet))
+                        except Exception:
+                            pass
 
-                # small delay to allow focus to return, then paste
-                time.sleep(0.2)
-                try:
-                    keyboard.press_and_release('ctrl+v')
-                except Exception:
-                    pass
+                        time.sleep(0.2)
+                        try:
+                            keyboard.press_and_release('ctrl+v')
+                        except Exception:
+                            pass
 
-                # keep the done window visible briefly then close
-                time.sleep(1.2)
-                try:
-                    gui.close()
-                except Exception:
-                    pass
+                        time.sleep(1.2)
+                        try:
+                            gui.close()
+                        except Exception:
+                            pass
 
-            except Exception as ex:
-                gui.update(f"Transcription error: {ex}")
-                print("Transcription error:", ex, file=sys.stderr)
-            finally:
-                try:
-                    os.remove(audio_path)
-                except Exception:
-                    pass
+                    except Exception as ex:
+                        gui.update(f"Transcription error: {ex}")
+                        print("Transcription error:", ex, file=sys.stderr)
+                    finally:
+                        try:
+                            os.remove(audio_path)
+                        except Exception:
+                            pass
 
-        t = threading.Thread(target=_process, daemon=True)
-        t.start()
+                t = threading.Thread(target=_process, daemon=True)
+                t.start()
 
-    # register key-specific handlers to avoid repeated events
+    # Register toggle handler
     try:
-        keyboard.on_press_key(HOTKEY, lambda e: on_press(e))
-        keyboard.on_release_key(HOTKEY, lambda e: on_release(e))
-    except Exception:
-        # fallback to generic handlers
-        keyboard.on_press(on_press)
-        keyboard.on_release(on_release)
+        keyboard.add_hotkey(current_hotkey, toggle_recording)
+    except Exception as ex:
+        print(f"Error registering hotkey: {ex}")
 
-    print("Ready. Press and hold the hotkey to record.")
+    def create_image():
+        # Create a simple icon: a circle with a letter 'W'
+        width = 64
+        height = 64
+        color1 = "#222222"
+        color2 = "#ffffff"
+        image = Image.new('RGB', (width, height), color1)
+        dc = ImageDraw.Draw(image)
+        dc.ellipse((8, 8, 56, 56), fill="#50C878") # emerald green
+        return image
+
+    def on_quit(icon, item):
+        icon.stop()
+        gui.root.after(0, gui.root.quit)
+        os._exit(0)
+
+    # Setup tray icon
+    menu = (item('WhisperGroq (Active)', lambda: None, enabled=False), 
+            item('Quit', on_quit))
+    icon = pystray.Icon("WhisperGroq", create_image(), "WhisperGroq", menu)
+    
+    # Run icon in a separate thread
+    threading.Thread(target=icon.run, daemon=True).start()
+
+    print(f"Ready. Press '{current_hotkey}' to start/stop recording.")
     try:
+        # Show a quick startup notification
+        gui.root.after(500, lambda: gui.show(("info", "WhisperGroq is running in background")))
+        gui.root.after(3000, gui.close)
+        
         gui.root.mainloop()
     except KeyboardInterrupt:
         print("Exiting")
