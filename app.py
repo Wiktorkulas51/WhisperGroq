@@ -118,36 +118,46 @@ def transcribe_with_groq(audio_path: str):
 
 
 class GUIManager:
-    def __init__(self):
+    def __init__(self, on_cancel=None):
         self._queue = queue.Queue()
         self.root = tk.Tk()
         # keep the root window hidden; use Toplevel windows for status
         self.root.withdraw()
         self._window = None
         self._label = None
+        self._mode = None
+        self._font_obj = None
+        self.on_cancel = on_cancel
         self._poll()
 
     def _poll(self):
         try:
             while True:
                 cmd, arg = self._queue.get_nowait()
-                if cmd == "show":
-                    self._do_show(arg)
-                elif cmd == "update":
-                    self._do_update(arg)
-                elif cmd == "close":
-                    self._do_close()
+                try:
+                    if cmd == "show":
+                        self._do_show(arg)
+                    elif cmd == "update":
+                        self._do_update(arg)
+                    elif cmd == "close":
+                        self._do_close()
+                except Exception as e:
+                    print(f"GUI Error in {cmd}: {e}", file=sys.stderr)
         except queue.Empty:
             pass
+        except Exception as e:
+            print(f"Poll Error: {e}", file=sys.stderr)
         self.root.after(100, self._poll)
 
     def _do_show(self, text: str):
         # Simplified dark rounded text-only popup placed bottom-center.
-        # Accept either a plain text or a (mode, text) tuple; we only use the text here.
-        body = text[1] if (isinstance(text, (tuple, list)) and len(text) > 1) else text
+        mode = "textpopup"
+        body = text
+        if isinstance(text, (tuple, list)) and len(text) > 1:
+            mode, body = text[0], text[1]
 
         if self._window:
-            self._do_update(body)
+            self._do_update(text)
             return
 
         self._window = tk.Toplevel(self.root)
@@ -157,45 +167,58 @@ class GUIManager:
             pass
         self._window.wm_attributes("-topmost", True)
 
-        # Create a unique transparent color key for the window background
         transparent_key = "#123456"
         bg_color = "#222222"
         fg_color = "#ffffff"
         pad_x = 18
         pad_y = 10
 
-        # set the window background to the transparent key
         try:
             self._window.configure(bg=transparent_key)
         except Exception:
             pass
 
-        # Canvas will draw the rounded rectangle and the text
         font_obj = tkfont.Font(family=None, size=11)
+        self._font_obj = font_obj # ensure it's available for updates
+        
         text_width = font_obj.measure(body)
         text_height = font_obj.metrics("linespace")
-        width = text_width + pad_x * 2
+        
+        x_btn_width = 30 if mode == "record" else 0
+        width = text_width + pad_x * 2 + x_btn_width
         height = text_height + pad_y * 2
 
         canvas = tk.Canvas(self._window, width=width, height=height, highlightthickness=0, bg=transparent_key)
         canvas.pack()
+        self._canvas = canvas
 
-        # draw rounded rectangle using ovals and rectangles
         r = 12
         color = bg_color
-        # center rectangle parts
         canvas.create_rectangle(r, 0, width - r, height, fill=color, outline=color)
         canvas.create_rectangle(0, r, width, height - r, fill=color, outline=color)
-        # four corner ovals
         canvas.create_oval(0, 0, 2 * r, 2 * r, fill=color, outline=color)
         canvas.create_oval(width - 2 * r, 0, width, 2 * r, fill=color, outline=color)
         canvas.create_oval(0, height - 2 * r, 2 * r, height, fill=color, outline=color)
         canvas.create_oval(width - 2 * r, height - 2 * r, width, height, fill=color, outline=color)
 
-        # draw text
-        self._text_id = canvas.create_text(width // 2, height // 2, text=body, fill=fg_color, font=font_obj)
+        text_x = (width - x_btn_width) // 2
+        self._text_id = canvas.create_text(text_x, height // 2, text=body, fill=fg_color, font=font_obj)
 
-        # try to make the background transparent (Windows supports -transparentcolor)
+        if mode == "record" and self.on_cancel:
+            x_pos = width - 20
+            x_id = canvas.create_text(x_pos, height // 2, text="✕", fill="#ff4444", font=(None, 12, "bold"))
+            # Use a slightly non-transparent fill for hit testing if needed, though "" usually works on windows if bound to tag
+            hit_area = canvas.create_rectangle(width - 40, 0, width, height, fill="#222222", outline="")
+            canvas.tag_lower(hit_area, x_id) # ensure X is above hit area but hit area is clickable
+            
+            def _cancel_handler(e):
+                if self.on_cancel:
+                    self.on_cancel()
+            
+            canvas.tag_bind(x_id, "<Button-1>", _cancel_handler)
+            canvas.tag_bind(hit_area, "<Button-1>", _cancel_handler)
+            canvas.config(cursor="hand2")
+
         try:
             self._window.wm_attributes("-transparentcolor", transparent_key)
         except Exception:
@@ -204,60 +227,78 @@ class GUIManager:
             except Exception:
                 pass
 
-        # position bottom-center
         self._window.update_idletasks()
         ws = self._window.winfo_screenwidth()
         hs = self._window.winfo_screenheight()
         x = (ws // 2) - (width // 2)
         y = hs - height - 60
         self._window.geometry(f"{width}x{height}+{x}+{y}")
-        self._mode = "textpopup"
-        self._canvas = canvas
-        self._font_obj = font_obj
+        self._mode = mode
+        self._window.deiconify()
+        self._window.lift()
 
     def _do_update(self, text: str):
-        # accept either a plain text or a (mode, text) tuple
         mode = None
         body = text
-        if isinstance(text, tuple) or isinstance(text, list):
-            mode, body = text[0], text[1]
+        if isinstance(text, (tuple, list)):
+            if len(text) > 1:
+                mode, body = text[0], text[1]
+            else:
+                body = text[0]
 
         if mode and mode != self._mode:
-            # recreate window with new mode
             self._do_close()
-            self._do_show((mode, body))
+            self._do_show(text)
             return
 
-            body = text[1] if (isinstance(text, (tuple, list)) and len(text) > 1) else text
-            if hasattr(self, "_canvas") and self._canvas and hasattr(self, "_text_id"):
-                # update text and resize background if needed
-                self._canvas.itemconfig(self._text_id, text=body)
-                # recompute size
-                text_width = self._font_obj.measure(body)
-                text_height = self._font_obj.metrics("linespace")
-                pad_x = 18
-                pad_y = 10
-                width = text_width + pad_x * 2
-                height = text_height + pad_y * 2
-                self._canvas.config(width=width, height=height)
-                # redraw rounded rect by clearing and recreating shapes
-                self._canvas.delete("all")
-                r = 12
-                color = "#222222"
-                self._canvas.create_rectangle(r, 0, width - r, height, fill=color, outline=color)
-                self._canvas.create_rectangle(0, r, width, height - r, fill=color, outline=color)
-                self._canvas.create_oval(0, 0, 2 * r, 2 * r, fill=color, outline=color)
-                self._canvas.create_oval(width - 2 * r, 0, width, 2 * r, fill=color, outline=color)
-                self._canvas.create_oval(0, height - 2 * r, 2 * r, height, fill=color, outline=color)
-                self._canvas.create_oval(width - 2 * r, height - 2 * r, width, height, fill=color, outline=color)
-                self._text_id = self._canvas.create_text(width // 2, height // 2, text=body, fill="#ffffff", font=self._font_obj)
-                # reposition window bottom-center
-                self._window.update_idletasks()
-                ws = self._window.winfo_screenwidth()
-                hs = self._window.winfo_screenheight()
-                x = (ws // 2) - (width // 2)
-                y = hs - height - 60
-                self._window.geometry(f"{width}x{height}+{x}+{y}")
+        if not self._window:
+            self._do_show(text)
+            return
+
+        if hasattr(self, "_canvas") and self._canvas and self._font_obj:
+            text_width = self._font_obj.measure(body)
+            text_height = self._font_obj.metrics("linespace")
+            pad_x = 18
+            pad_y = 10
+            
+            x_btn_width = 30 if self._mode == "record" else 0
+            width = text_width + pad_x * 2 + x_btn_width
+            height = text_height + pad_y * 2
+            
+            self._canvas.config(width=width, height=height)
+            self._canvas.delete("all")
+            r = 12
+            color = "#222222"
+            self._canvas.create_rectangle(r, 0, width - r, height, fill=color, outline=color)
+            self._canvas.create_rectangle(0, r, width, height - r, fill=color, outline=color)
+            self._canvas.create_oval(0, 0, 2 * r, 2 * r, fill=color, outline=color)
+            self._canvas.create_oval(width - 2 * r, 0, width, 2 * r, fill=color, outline=color)
+            self._canvas.create_oval(0, height - 2 * r, 2 * r, height, fill=color, outline=color)
+            self._canvas.create_oval(width - 2 * r, height - 2 * r, width, height, fill=color, outline=color)
+            
+            text_x = (width - x_btn_width) // 2
+            self._text_id = self._canvas.create_text(text_x, height // 2, text=body, fill="#ffffff", font=self._font_obj)
+            
+            if self._mode == "record" and self.on_cancel:
+                x_pos = width - 20
+                x_id = self._canvas.create_text(x_pos, height // 2, text="✕", fill="#ff4444", font=(None, 12, "bold"))
+                hit_area = self._canvas.create_rectangle(width - 40, 0, width, height, fill="#222222", outline="")
+                self._canvas.tag_lower(hit_area, x_id)
+                
+                def _cancel_handler(e):
+                    if self.on_cancel:
+                        self.on_cancel()
+                
+                self._canvas.tag_bind(x_id, "<Button-1>", _cancel_handler)
+                self._canvas.tag_bind(hit_area, "<Button-1>", _cancel_handler)
+            
+            self._window.update_idletasks()
+            ws = self._window.winfo_screenwidth()
+            hs = self._window.winfo_screenheight()
+            x = (ws // 2) - (width // 2)
+            y = hs - height - 60
+            self._window.geometry(f"{width}x{height}+{x}+{y}")
+            self._window.lift()
 
     def _do_close(self):
         if self._window:
@@ -299,8 +340,22 @@ def main():
     # Use ctrl+alt as default if not in .env
     current_hotkey = os.getenv("HOTKEY", "ctrl+alt")
     print_banner(current_hotkey)
+    def cancel_recording():
+        with state_lock:
+            if recording_state["is_recording"]:
+                print("Recording cancelled (UI)")
+                recording_state["is_recording"] = False
+                try:
+                    # stop the recorder but don't save anything
+                    recorder._running.clear()
+                    if recorder._rec_thread:
+                        recorder._rec_thread.join()
+                    gui.close()
+                except Exception as ex:
+                    print("Error cancelling:", ex)
+
     recorder = Recorder()
-    gui = GUIManager()
+    gui = GUIManager(on_cancel=cancel_recording)
 
     recording_state = {"is_recording": False, "last_toggle_time": 0}
     state_lock = threading.Lock()
