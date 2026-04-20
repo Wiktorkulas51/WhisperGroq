@@ -181,11 +181,14 @@ class GUIManager:
         font_obj = tkfont.Font(family=None, size=11)
         self._font_obj = font_obj # ensure it's available for updates
         
+        # extra space for icons
+        x_btn_width = 30 if mode == "record" else 0
+        done_icon_width = 30 if mode == "done" else 0
+        
         text_width = font_obj.measure(body)
         text_height = font_obj.metrics("linespace")
         
-        x_btn_width = 30 if mode == "record" else 0
-        width = text_width + pad_x * 2 + x_btn_width
+        width = text_width + pad_x * 2 + x_btn_width + done_icon_width
         height = text_height + pad_y * 2
 
         canvas = tk.Canvas(self._window, width=width, height=height, highlightthickness=0, bg=transparent_key)
@@ -201,15 +204,21 @@ class GUIManager:
         canvas.create_oval(0, height - 2 * r, 2 * r, height, fill=color, outline=color)
         canvas.create_oval(width - 2 * r, height - 2 * r, width, height, fill=color, outline=color)
 
-        text_x = (width - x_btn_width) // 2
+        # Draw done icon (green check)
+        if mode == "done":
+            canvas.create_oval(pad_x, height//2 - 10, pad_x + 20, height//2 + 10, fill="#4CAF50", outline="#4CAF50")
+            canvas.create_text(pad_x + 10, height // 2, text="✓", fill="white", font=(None, 12, "bold"))
+            text_x = pad_x + done_icon_width + text_width // 2
+        else:
+            text_x = (width - x_btn_width) // 2
+            
         self._text_id = canvas.create_text(text_x, height // 2, text=body, fill=fg_color, font=font_obj)
 
         if mode == "record" and self.on_cancel:
             x_pos = width - 20
             x_id = canvas.create_text(x_pos, height // 2, text="✕", fill="#ff4444", font=(None, 12, "bold"))
-            # Use a slightly non-transparent fill for hit testing if needed, though "" usually works on windows if bound to tag
             hit_area = canvas.create_rectangle(width - 40, 0, width, height, fill="#222222", outline="")
-            canvas.tag_lower(hit_area, x_id) # ensure X is above hit area but hit area is clickable
+            canvas.tag_lower(hit_area, x_id)
             
             def _cancel_handler(e):
                 if self.on_cancel:
@@ -262,7 +271,9 @@ class GUIManager:
             pad_y = 10
             
             x_btn_width = 30 if self._mode == "record" else 0
-            width = text_width + pad_x * 2 + x_btn_width
+            done_icon_width = 30 if self._mode == "done" else 0
+            
+            width = text_width + pad_x * 2 + x_btn_width + done_icon_width
             height = text_height + pad_y * 2
             
             self._canvas.config(width=width, height=height)
@@ -276,7 +287,13 @@ class GUIManager:
             self._canvas.create_oval(0, height - 2 * r, 2 * r, height, fill=color, outline=color)
             self._canvas.create_oval(width - 2 * r, height - 2 * r, width, height, fill=color, outline=color)
             
-            text_x = (width - x_btn_width) // 2
+            if self._mode == "done":
+                self._canvas.create_oval(pad_x, height//2 - 10, pad_x + 20, height//2 + 10, fill="#4CAF50", outline="#4CAF50")
+                self._canvas.create_text(pad_x + 10, height // 2, text="✓", fill="white", font=(None, 12, "bold"))
+                text_x = pad_x + done_icon_width + text_width // 2
+            else:
+                text_x = (width - x_btn_width) // 2
+                
             self._text_id = self._canvas.create_text(text_x, height // 2, text=body, fill="#ffffff", font=self._font_obj)
             
             if self._mode == "record" and self.on_cancel:
@@ -426,8 +443,8 @@ def main():
                                 pass
 
                         try:
-                            snippet = text if len(text) <= 300 else text[:300] + "..."
-                            gui.show(("done", snippet))
+                            # snippet = text if len(text) <= 300 else text[:300] + "..."
+                            gui.show(("done", "Success! Copied to clipboard."))
                         except Exception:
                             pass
 
