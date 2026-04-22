@@ -20,9 +20,10 @@ from PIL import Image, ImageDraw
 load_dotenv()
 
 try:
-    from groq import Groq
+    from groq import Groq, RateLimitError
 except Exception:
     Groq = None
+    RateLimitError = Exception
 
 API_KEY = os.getenv("GROQ_API_KEY")
 HOTKEY = os.getenv("HOTKEY", "f9")  # default hotkey: F9 (press-and-hold)
@@ -82,33 +83,50 @@ class Recorder:
         return outpath
 
 
-# list of models to alternate between
+# list of models: [Primary, Fallback]
 MODELS = ["whisper-large-v3", "whisper-large-v3-turbo"]
-_model_index = 0
-_model_lock = threading.Lock()
 
 def transcribe_with_groq(audio_path: str):
-    global _model_index
     if Groq is None:
         raise RuntimeError("Groq package not installed or failed to import")
     if not API_KEY:
         raise RuntimeError("Set GROQ_API_KEY environment variable first")
 
-    with _model_lock:
-        model_name = MODELS[_model_index]
-        _model_index = (_model_index + 1) % len(MODELS)
-
-    print(f"Transcribing using model: {model_name}")
-
     client = Groq(api_key=API_KEY)
     with open(audio_path, "rb") as f:
         audio_bytes = f.read()
-    resp = client.audio.transcriptions.create(
-        file=(os.path.basename(audio_path), audio_bytes),
-        model=model_name,
-        temperature=0,
-        response_format="verbose_json",
-    )
+    
+    filename = os.path.basename(audio_path)
+    primary_model = MODELS[0]
+    
+    try:
+        print(f"Transcribing using primary model: {primary_model}")
+        resp = client.audio.transcriptions.create(
+            file=(filename, audio_bytes),
+            model=primary_model,
+            temperature=0,
+            response_format="verbose_json",
+        )
+    except Exception as e:
+        # Check if it's a rate limit error (429)
+        is_rate_limit = False
+        if isinstance(e, RateLimitError):
+            is_rate_limit = True
+        elif "429" in str(e) or "rate limit" in str(e).lower():
+            is_rate_limit = True
+        
+        if is_rate_limit and len(MODELS) > 1:
+            fallback_model = MODELS[1]
+            print(f"Rate limit hit on {primary_model}. Falling back to: {fallback_model}...")
+            resp = client.audio.transcriptions.create(
+                file=(filename, audio_bytes),
+                model=fallback_model,
+                temperature=0,
+                response_format="verbose_json",
+            )
+        else:
+            raise e
+
     # object shape depends on SDK; try common access patterns
     if hasattr(resp, "text"):
         return resp.text
